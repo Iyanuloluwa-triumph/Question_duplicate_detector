@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Exam Bank Ingestion</title>
+    <style>
+        :root {
+            --bg-color: #f4f4f9;
+            --card-bg: #ffffff;
+            --primary: #4f46e5;
+            --text-main: #333333;
+            --border: #d1d5db;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+        }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: var(--bg-color); color: var(--text-main); padding: 2rem; max-width: 800px; margin: 0 auto; }
+        .card { background: var(--card-bg); padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        h1 { margin-top: 0; color: var(--primary); }
+        .form-group { margin-bottom: 1.5rem; }
+        label { display: block; font-weight: bold; margin-bottom: 0.5rem; }
+        select, textarea { width: 100%; padding: 0.75rem; border: 1px solid var(--border); border-radius: 4px; font-family: inherit; font-size: 1rem; box-sizing: border-box; }
+        textarea { resize: vertical; min-height: 120px; }
+        .radio-group { display: flex; gap: 1rem; margin-bottom: 0.5rem; }
+        button { background-color: var(--primary); color: white; border: none; padding: 0.75rem 1.5rem; font-size: 1rem; border-radius: 4px; cursor: pointer; font-weight: bold; width: 100%; }
+        button:hover { opacity: 0.9; }
+        #results { margin-top: 2rem; }
+        .result-box { padding: 1rem; border-radius: 4px; margin-bottom: 1rem; border-left: 4px solid var(--border); background: #f9fafb; }
+        .status-APPROVED { border-left-color: var(--success); }
+        .status-DUPLICATE_REJECTED { border-left-color: var(--danger); }
+        .status-NEEDS_HUMAN_REVIEW { border-left-color: var(--warning); }
+        .match-list { font-size: 0.9em; color: #555; margin-top: 0.5rem; padding-left: 1rem; }
+        .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1rem; text-align: center; }
+        .stat-card { background: #f3f4f6; padding: 1rem; border-radius: 4px; font-weight: bold; }
+        .loader { display: none; text-align: center; font-weight: bold; color: var(--primary); margin-top: 1rem; }
+    </style>
+</head>
+<body>
+
+    <div class="card">
+        <h1>Add Questions to Bank</h1>
+        <form id="ingestForm">
+            <div class="form-group">
+                <label for="subject">Subject</label>
+                <select id="subject" required>
+                    <option value="mathematics">Mathematics</option>
+                    <option value="physics">Physics</option>
+                    <option value="chemistry">Chemistry</option>
+                    <option value="english">English</option>
+                    <option value="computer_science">Computer Science</option>
+                    <option value="Yoruba">Yoruba</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label>Ingestion Mode</label>
+                <div class="radio-group">
+                    <label><input type="radio" name="mode" value="single" checked> Single Question</label>
+                    <label><input type="radio" name="mode" value="batch"> Batch (One per line)</label>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="questionText">Question Text</label>
+                <textarea id="questionText" placeholder="Enter your question here..." required></textarea>
+            </div>
+
+            <button type="submit">Process Question(s)</button>
+            <div id="loader" class="loader">Processing... Please wait.</div>
+        </form>
+    </div>
+
+    <div id="results"></div>
+
+    <script>
+        const API_URL = "http://localhost:8000";
+
+        document.getElementById('ingestForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const subject = document.getElementById('subject').value;
+            const mode = document.querySelector('input[name="mode"]:checked').value;
+            const textRaw = document.getElementById('questionText').value;
+            const resultsDiv = document.getElementById('results');
+            const loader = document.getElementById('loader');
+            
+            resultsDiv.innerHTML = '';
+            loader.style.display = 'block';
+
+            try {
+                if (mode === 'single') {
+                    const response = await fetch(`${API_URL}/ingest/single`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ subject: subject, question_text: textRaw.trim() })
+                    });
+                    const data = await response.json();
+                    renderSingleResult(data, resultsDiv);
+                } else {
+                    // Split text by new lines, remove empty lines
+                    const questions = textRaw.split('\n').map(q => q.trim()).filter(q => q.length > 0);
+                    if (questions.length === 0) throw new Error("No valid questions found.");
+
+                    const response = await fetch(`${API_URL}/ingest/batch`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ subject: subject, questions: questions })
+                    });
+                    const data = await response.json();
+                    renderBatchResult(data, resultsDiv);
+                }
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="result-box status-DUPLICATE_REJECTED"><strong>Error:</strong> ${error.message} <br><small>Make sure the FastAPI server is running and CORS is configured.</small></div>`;
+            } finally {
+                loader.style.display = 'none';
+            }
+        });
+
+        function renderSingleResult(data, container) {
+            let matchesHtml = '';
+            if (data.top_matches && data.top_matches.length > 0) {
+                matchesHtml = `<ul class="match-list">` + 
+                    data.top_matches.map(m => 
+                        `<li>ID ${m.question_id}: "${m.question_text}" <br>
+                        <em>(FAISS: ${m.bi_encoder_score.toFixed(3)}, Cross-Encoder: ${m.cross_encoder_score ? m.cross_encoder_score.toFixed(3) : 'N/A'})</em></li>`
+                    ).join('') + 
+                `</ul>`;
+            }
+
+            container.innerHTML += `
+                <div class="result-box status-${data.status}">
+                    <strong>Status: ${data.status}</strong> 
+                    ${data.question_id !== null ? `(Assigned ID: ${data.question_id})` : ''}
+                    <p style="margin: 0.5rem 0;">${data.question_text}</p>
+                    <small>${data.message}</small>
+                    ${matchesHtml}
+                </div>
+            `;
+        }
+
+        function renderBatchResult(data, container) {
+            container.innerHTML = `
+                <div class="stats-grid">
+                    <div class="stat-card">Total: ${data.total_processed}</div>
+                    <div class="stat-card" style="color: var(--success)">Approved: ${data.total_approved}</div>
+                    <div class="stat-card" style="color: var(--danger)">Rejected: ${data.total_rejected}</div>
+                    <div class="stat-card" style="color: var(--warning)">Review: ${data.total_needs_review}</div>
+                </div>
+                <h3>Individual Results:</h3>
+            `;
+            data.results.forEach(res => renderSingleResult(res, container));
+        }
+    </script>
+</body>
+</html>
